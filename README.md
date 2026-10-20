@@ -56,7 +56,7 @@ Other manufacturers are rejected because they were not tested.
 | bit 1 | on | 2000 | on | 2 |
 | bit 0 | auto | 0 | auto | 0 |
 
-`level` and `autosuspend` are legacy attributes and may be missing on newer kernels. The default waiting period is 5 s per bit (`--interval` to change it).
+`level` and `autosuspend` are legacy attributes and may be missing on newer kernels. They are skipped if absent. The script exits with an error if writing `control` or `autosuspend_delay_ms` fails. The default waiting period is 5 s per bit (`--interval` to change it, see below).
 
 On the Galaxy S22 the charging-state response appeared only after selecting the "Transferring images" USB mode on the phone.
 
@@ -79,12 +79,11 @@ If you pass a device instance ID instead of a hardware ID, prefix it with `@`.
 
 Bit 1 enables the device and bit 0 disables it. Enable is issued twice because a single call did not always restore the device state in our setup. The default waiting period is 1 s per bit.
 
-Some devices recover too slowly for 1 s symbols. The rates in the paper were obtained with these symbol intervals.
+The script exits with an error if a DevCon command fails.
 
-| Receiver | Interval | Rate |
-|---|---|---|
-| Mouse | 1 s | 1.0 bit/s |
-| Webcam, USB hub, smartphone charging | 4 s | 0.25 bit/s |
+### Waiting period and symbol timing
+
+`--interval` sets a software waiting period that starts after the control operations for a bit have finished. The time between successive symbols is this waiting period plus command execution and scheduling delay, so the actual symbol period is longer than `--interval` and varies between hosts and devices. Some peripherals also recover too slowly to be distinguishable at short waiting periods. Choose the waiting period for the receiver you use, and check the resulting timing on the receiver side.
 
 ```
 python final_send.py -i 101011 --hwid "<HWID>" --interval 4
@@ -112,9 +111,11 @@ Tested on a Galaxy S22 running Android 14. Allow installation from unknown sourc
 
 1. Install the app and connect the phone to the transmitting host.
 2. Enter the number of bits to receive.
-3. Start the app, then start the transmitter.
+3. Start reception in the app and the transmitter at the same moment.
 
-The app reads the battery status reported by Android and splits the samples into windows of one symbol each. A window is decoded as 1 if every sample in it is charging or full, and as 0 otherwise. The decoded bits are shown on screen. No root access or system modification is needed.
+For each bit, the app takes 6 battery-status samples 1 s apart, so one bit window lasts about 6 s or slightly more with processing time. A window is decoded as 1 if every sample in it is charging or full, and as 0 otherwise. The decoded bits are shown on screen. No root access or system modification is needed.
+
+The app does not detect the preamble or synchronize to the transmitter by itself. Alignment depends on starting both sides together, and the transmitter's symbol period has to match the app's bit window. Set `--interval` accordingly and allow for the command execution time described above.
 
 ## RF receiver (`RF_receive.py`)
 
@@ -127,15 +128,17 @@ hackrf_transfer -r output -f 5000000 -s 2600000 -a 1
 Then plot the trace.
 
 ```
-python3 RF_receive.py output
-python3 RF_receive.py output --save trace.png
+python3 RF_receive.py output --dtype int8
+python3 RF_receive.py output --dtype int8 --save trace.png
 ```
 
 The script applies an STFT (8192-sample segments at 2.6 MS/s), takes the magnitude of the zero-frequency bin, drops the first and last 20 frames, and plots `(A_max - A_k) / A_max`. Bits are read from the presence or absence of bursts in each symbol interval.
 
 The script only extracts and plots the trace. It does not synchronize frames, pick a threshold, or output bits.
 
-The figures in the paper were produced by reading the capture as unsigned 8-bit samples, which is the default here. `hackrf_transfer` actually writes signed 8-bit samples. Use `--dtype int8` to read them that way.
+`hackrf_transfer` writes signed 8-bit I/Q, which is the default (`--dtype int8`). The previously released version of this script read captures as unsigned 8-bit samples. `--dtype uint8` reproduces that behavior.
+
+The script stops with an error if the capture is too short for the STFT or if the trace cannot be normalized.
 
 5 MHz is where switching-related bursts were easiest to see in our setup. It may differ with other hardware, and RF results were obtained only with the antenna touching the cable.
 

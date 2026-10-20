@@ -10,6 +10,8 @@ Requires root on Linux and administrator privileges on Windows.
 """
 
 import argparse
+import math
+import os
 import platform
 import subprocess
 import sys
@@ -19,24 +21,33 @@ SYSFS_DEVICES = "/sys/bus/usb/devices/"
 SYSFS_DRIVER = "/sys/bus/usb/drivers/usb/"
 
 # Values written for the active (bit 1) and inactive (bit 0) control states.
-# Order: level, autosuspend_delay_ms, autosuspend, control
-ACTIVE = [("level", "on"), ("autosuspend_delay_ms", "2000"),
-          ("autosuspend", "2"), ("control", "on")]
-INACTIVE = [("level", "auto"), ("autosuspend_delay_ms", "0"),
-            ("autosuspend", "0"), ("control", "auto")]
+# (attribute, value, required). level and autosuspend are legacy attributes
+# that may not exist on newer kernels, so they are written only if present.
+ACTIVE = [("level", "on", False), ("autosuspend_delay_ms", "2000", True),
+          ("autosuspend", "2", False), ("control", "on", True)]
+INACTIVE = [("level", "auto", False), ("autosuspend_delay_ms", "0", True),
+            ("autosuspend", "0", False), ("control", "auto", True)]
 
 
-def sysfs_write(path, value):
+def sysfs_write(path, value, required):
+    if not os.path.exists(path):
+        if required:
+            sys.exit(f"Required attribute not found: {path}")
+        return
     # Issued through sudo tee, as in the original implementation.
-    # level and autosuspend are legacy attributes and may not exist on newer kernels.
-    subprocess.run(["sudo", "tee", "-a", path], input=(value + "\n").encode(),
-                   stdout=subprocess.DEVNULL, check=False)
+    r = subprocess.run(["sudo", "tee", "-a", path], input=(value + "\n").encode(),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if r.returncode != 0:
+        msg = f"Write failed: {value} -> {path}: {r.stderr.decode().strip()}"
+        if required:
+            sys.exit(msg)
+        print("warning:", msg, file=sys.stderr)
 
 
 def linux_apply(port, bases, settings):
     for base in bases:
-        for attr, value in settings:
-            sysfs_write(base + port + "/power/" + attr, value)
+        for attr, value, required in settings:
+            sysfs_write(base + port + "/power/" + attr, value, required)
     with open(SYSFS_DEVICES + port + "/power/runtime_status") as f:
         print("runtime_status:", f.read().strip())
 
@@ -64,7 +75,13 @@ def send_linux(msg, port, interval):
 
 
 def devcon(action, hwid):
-    subprocess.run(["devcon", action, hwid], check=False)
+    try:
+        r = subprocess.run(["devcon", action, hwid], capture_output=True, text=True)
+    except FileNotFoundError:
+        sys.exit("devcon not found. Install DevCon and add it to PATH.")
+    if r.returncode != 0:
+        sys.exit(f"devcon {action} {hwid} failed (exit {r.returncode}): "
+                 f"{(r.stdout + r.stderr).strip()}")
 
 
 def enable(hwid):
@@ -91,7 +108,8 @@ def send_windows(msg, hwid, interval, rf):
             time.sleep(interval)
     else:
         # Event-based encoding: 1 = one state change at the start of the
-        # symbol, 0 = no change.
+        # symbol, 0 = no change. devcon() exits on failure, so the tracked
+        # state only changes after a successful command.
         enabled = True
         for bit in msg:
             print("bit", bit)
@@ -104,6 +122,16 @@ def send_windows(msg, hwid, interval, rf):
             time.sleep(interval)
 
 
+def positive_float(s):
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {s!r}")
+    if not math.isfinite(v) or v <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return v
+
+
 def main():
     p = argparse.ArgumentParser(description="SPECTER transmitter")
     p.add_argument("-i", "--input", required=True,
@@ -112,9 +140,10 @@ def main():
                    help="Linux: USB device path under /sys/bus/usb/devices, e.g. 1-1")
     p.add_argument("--hwid",
                    help="Windows: hardware ID (or @instance ID) passed to devcon")
-    p.add_argument("--interval", type=float,
-                   help="waiting period after each symbol in seconds "
-                        "(default 5 on Linux, 1 on Windows)")
+    p.add_argument("--interval", type=positive_float,
+                   help="software waiting period after each symbol's control "
+                        "operations, in seconds (default 5 on Linux, 1 on Windows). "
+                        "Command execution time is added on top of this.")
     p.add_argument("--rf", action="store_true",
                    help="Windows: use event-based encoding for the RF receiver")
     args = p.parse_args()

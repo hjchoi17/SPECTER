@@ -111,11 +111,11 @@ Tested on a Galaxy S22 running Android 14. Allow installation from unknown sourc
 
 1. Install the app and connect the phone to the transmitting host.
 2. Enter the number of bits to receive.
-3. Start reception in the app and the transmitter at the same moment.
+3. Start reception so that it lines up with the first transmitted symbol. On Windows the transmitter runs a device initialization sequence before sending the bit string, so launching both programs at the same moment does not align the symbols.
 
 For each bit, the app takes 6 battery-status samples 1 s apart, so one bit window lasts about 6 s or slightly more with processing time. A window is decoded as 1 if every sample in it is charging or full, and as 0 otherwise. The decoded bits are shown on screen. No root access or system modification is needed.
 
-The app does not detect the preamble or synchronize to the transmitter by itself. Alignment depends on starting both sides together, and the transmitter's symbol period has to match the app's bit window. Set `--interval` accordingly and allow for the command execution time described above.
+The app does not detect the preamble or synchronize to the transmitter by itself. Alignment depends on starting reception at the first symbol, and the transmitter's symbol period has to match the app's bit window. Set `--interval` accordingly and allow for the command execution time described above.
 
 ## RF receiver (`RF_receive.py`)
 

@@ -41,8 +41,8 @@ def main():
                    help="save the plot to a file instead of opening a window")
     args = p.parse_args()
 
-    if args.fs <= 0 or args.nperseg <= 0:
-        p.error("--fs and --nperseg must be positive")
+    if not np.isfinite(args.fs) or args.fs <= 0 or args.nperseg <= 0:
+        p.error("--fs must be finite and positive, and --nperseg must be positive")
 
     if args.save:
         matplotlib.use("Agg")

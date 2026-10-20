@@ -1,134 +1,144 @@
-# SPECTER: USB Power Modulation Transmitter and RF Receiver
-Reference implementation for studying a covert channel that encodes bits by toggling the USB port power and, optionally, receives low frequency RF emissions produced by those power transitions. This repository includes a transmitter and an RF receiver.
+# SPECTER
 
-## Ethical and Safety Notice
-- Use only in a controlled lab with devices you own and explicit authorization.
-- Do not deploy on systems or networks you do not control.
-- The code modulates VBUS power only. The D+ and D- data lines are not used.
-- Peripherals remain unmodified in our experiments.
+Artifact for "SPECTER: Covert Data Exfiltration from Air-Gapped Systems via USB Power Modulation."
 
-## Repository Contents
- - final_send.py - USB power modulation transmitter CLI. Linux uses sysfs power knobs. Windows uses devcon to enable or disable the device. macOS is present but not supported.
- - RF_receive.py - Minimal RF receiver that reads interleaved unsigned-8-bit IQ from a file, performs an STFT, and visualizes a normalized envelope over time.
+SPECTER sends bits from a host by issuing host-side USB power-management or device-state operations. The payload is not placed in USB data transfers. The result is observed through one of three receiver paths: smartphone charging state, visible peripheral behavior, or near-field RF activity near the USB cable.
 
-## Summary of the Method
-- Transmitter encodes bits by toggling the USB port power.
-- Receivers
-  1. Charging status on a smartphone
-  2. Peripheral operating status observed via LEDs or activity indicators
-  3. RF reception that measures low frequency emissions near 5 MHz with a software defined radio
- 
-This repository provides code for (1) transmitter and (3) RF receiver.
+These operations change the runtime power-management or operating-system device state. They do not by themselves guarantee that VBUS is physically disconnected. What can be observed depends on the host controller, hub, driver, and connected device.
 
-## Requirements
-- OS: Windows 10 or Ubuntu 22.04 LTS
-- Python: 3.9 or newer
-- Privileges: administrator on Windows or root on Linux for port power control
-- Optional RF hardware
-  - Software defined radio (SDR) supported by SoapySDR or UHD
-  - Low frequency antenna or a simple wire placed near the USB cable
-  
-`pip3 install -r requirments.txt`
+## Ethical notice
 
-## Transmitter (final_send.py)
-Encodes a bit string by toggling the USB port power per bit.
+Use this code only on devices you own, in an isolated lab. Do not run it on systems you are not authorized to control.
 
-### Packet and Encoding
-- Payload: user supplied bit string
-- Encoding
-  - Charging and operating status receivers
-     - 1 is power on and 0 is power off with device specific dwell
-  - RF receiver
-     - 1 is the presence of exactly one power toggle at the start of a symbol interval
-     - 0 is no toggle during the interval
-- Symbol duration: device dependent
-   - mouse 1 s
-   - other peripherals up to 4 s
+## Contents
 
- ### Quick Start
- `python3 total_send.py [-i inptut_message]`
- `python3 total_send.py [--input inptut_message]`
+| File | Description |
+|---|---|
+| `final_send.py` | Transmitter for Linux (sysfs) and Windows (DevCon) |
+| `charging_receive.apk` | Android charging-state receiver |
+| `RF_receive.py` | RF trace extraction and plotting from an I/Q capture |
+| `requirements.txt` | Python dependencies for `RF_receive.py` |
 
-### Linux notes
-- Edit the placeholder port = 'PORT' to your device path (for example 1-1).
-- The script reads /sys/bus/usb/devices/<PORT>/manufacturer and applies different sysfs writes for Samsung vs Apple.
-- For each bit it writes to power control files under both /sys/bus/usb/drivers/usb/<PORT>/power/… and /sys/bus/usb/devices/<PORT>/power/…, then sleeps 5 s per bit, which yields about 0.2 bit/s.
+The peripheral-state receiver needs no code. The observer watches the device LED or behavior directly.
 
-### Windows notes
-- Install Microsoft DevCon and ensure it is on PATH.
-- Set parsed_hwid = 'PID' to your device’s hardware ID string.
-- The script does a few devcon enable/disable calls to initialize, then for each bit:
-   - bit 1 → devcon enable <HWID> (twice) and sleep 1 s
-   - bit 0 → devcon disable <HWID> and sleep 1 s
-- There is a code path intended for RF experiments gated by RF == "1". It is currently hard-coded to RF = 0 and compared to a string, so you must edit the file and set RF = "1" to activate the event-based toggling that only flips power during symbols carrying a one.
+## Tested environment
 
-### macOS
-- A placeholder branch exists that renames a kext, but the script marks macOS as not supported for power toggling.
+- Transmitter hosts: Ubuntu 22.04.4 (desktop), Windows 10 (laptop)
+- Charging-state receivers: Galaxy S22 (Android 14) with the app, iPhone 13 Pro (iOS 17.4.1) by watching the charging indicator
+- Peripherals: USB mouse, keyboard, webcam, wireless-headset dongle, USB hub
+- RF: HackRF One with an LF-R 400 loop antenna placed in direct contact with the USB cable
 
-## Android charging receiver (charging_receiver.apk)
-### Requirements
-- Android 10 or newer recommended
-- Enable Install unknown apps for your file manager
-- Connect the phone to the target host via USB
-- On some devices, you must choose a USB mode such as Transferring images (PTP/MTP) to allow reliable power control
+Python 3.9 or newer.
 
-### Quick start
-1. Copy charging_receive.apk to the phone and install it.
-2. Connect the phone to the target machine with a USB cable.
-3. Open the app and press Start capture.
-4. Run the transmitter on the host.
-5. Press Stop capture.
+```
+pip3 install -r requirements.txt
+```
 
-### Decoding rule
-- Transition present within an interval → 1
-- No transition within an interval → 0
+## Transmitter (`final_send.py`)
 
-## RF Receiver (RF_receiove.py)
-Parses an interleaved uint8 IQ file, performs STFT, and plots a normalized envelope vs time.
+Root is required on Linux and administrator privileges on Windows. The target device must be given explicitly on the command line.
 
-### Expected input
-- A raw IQ capture file named output in the working directory. This file is produced with HackRF using the command below.
-- Interleaved unsigned 8-bit IQ format [I0, Q0, I1, Q1, …].
-- Default sample rate in the script is 2_600_000 sps, which matches the command.
+### Linux
 
-### Record IQ with HackRF
-`hackrf_transfer -r output -f 5000000 -s 2600000 -a 1 -x 0`
+```
+sudo python3 final_send.py -i 101011 --port 1-1
+```
 
-- -r output writes interleaved uint8 IQ to a file named output
-- -f 5000000 tunes near 5 MHz
-- -s 2600000 sample rate 2.6 MS/s
-- -a 1 enables the on-board amplifier path (bias/amp, board dependent)
-- -x 0 sets TX VGA, harmless here and left at 0
+`--port` is the device name under `/sys/bus/usb/devices/`. The script reads the device manufacturer and uses one of two branches.
 
-### Quick Start
-`python3 RF_receive.py`
+- `Apple Inc.` writes the active or inactive values under `/sys/bus/usb/devices/<port>/power/`.
+- `SAMSUNG` writes the same values through both `/sys/bus/usb/drivers/usb/<port>/power/` and `/sys/bus/usb/devices/<port>/power/`. The two paths may point to the same device.
 
-The script reads output, performs STFT, and plots a normalized envelope over time. You should see amplitude spikes aligned with symbol intervals. If the plot is noisy, increase the symbol duration on the transmitter or repeat the packet.
+Other manufacturers are rejected because they were not tested.
 
-If you use a different SDR or filename, either rename your file to output or edit the filename variable at the top of RF_receive.py.
+| | `control` | `autosuspend_delay_ms` | `level` | `autosuspend` |
+|---|---|---|---|---|
+| bit 1 | on | 2000 | on | 2 |
+| bit 0 | auto | 0 | auto | 0 |
 
-## End-to-End Checklist
-1. Confirm OS-level privileges for power control.
-2. On Linux set PORT, on Windows set parsed_hwid.
-3. Choose a symbol duration that matches your device latency
-  - mouse about 1 s, other peripherals up to 4 s per symbol
-4. If using the RF path, capture IQ near 5 MHz, then run RF_receive.py.
-5. Align the transmitter bit schedule with the RF plot to verify correct decoding.
+`level` and `autosuspend` are legacy attributes and may be missing on newer kernels. The default waiting period is 5 s per bit (`--interval` to change it).
 
-## Known limitations
-- Placeholders PORT and PID must be set by the user.
-- Linux sleeps 5 s per bit, which caps rate at 0.2 bit/s unless you modify the code.
-- RF script expects uint8 IQ and a hard-coded filename. Change filename or adapt to your SDR format as needed.
+On the Galaxy S22 the charging-state response appeared only after selecting the "Transferring images" USB mode on the phone.
 
-## FAQ
-**Does this use the USB data lines?**
+### Windows
 
-No. Only VBUS power is modulated. D+ and D− remain unused.
+Install [DevCon](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/devcon) and put it on PATH. Find the device with
 
-**Are peripherals modified?**
+```
+devcon findall "*USB*"
+devcon hwids "*USB*"
+```
 
-No. Peripherals are left unmodified in our experiments.
+then run
 
-**Why 5 MHz?**
+```
+python final_send.py -i 101011 --hwid "<HWID>"
+```
 
-In our lab, bursts from power transitions were most visible near 5 MHz in spectrum waterfalls. You may need to scout and adjust.
+If you pass a device instance ID instead of a hardware ID, prefix it with `@`.
+
+Bit 1 enables the device and bit 0 disables it. Enable is issued twice because a single call did not always restore the device state in our setup. The default waiting period is 1 s per bit.
+
+Some devices recover too slowly for 1 s symbols. The rates in the paper were obtained with these symbol intervals.
+
+| Receiver | Interval | Rate |
+|---|---|---|
+| Mouse | 1 s | 1.0 bit/s |
+| Webcam, USB hub, smartphone charging | 4 s | 0.25 bit/s |
+
+```
+python final_send.py -i 101011 --hwid "<HWID>" --interval 4
+```
+
+For the RF receiver add `--rf`. This switches to event-based encoding, where bit 1 is one state change at the start of the symbol and bit 0 is no change.
+
+```
+python final_send.py -i 101011 --hwid "<HWID>" --rf
+```
+
+### Packet format
+
+The transmitter sends the bit string exactly as given. Framing is done beforehand. For charging-state and peripheral-state reception the paper uses
+
+```
+preamble 101011 | header (payload length) | payload | CRC | trailer 1
+```
+
+and the RF experiments use the shorter preamble `101`.
+
+## Android charging-state receiver (`charging_receive.apk`)
+
+Tested on a Galaxy S22 running Android 14. Allow installation from unknown sources to install the APK.
+
+1. Install the app and connect the phone to the transmitting host.
+2. Enter the number of bits to receive.
+3. Start the app, then start the transmitter.
+
+The app reads the battery status reported by Android and splits the samples into windows of one symbol each. A window is decoded as 1 if every sample in it is charging or full, and as 0 otherwise. The decoded bits are shown on screen. No root access or system modification is needed.
+
+## RF receiver (`RF_receive.py`)
+
+Capture I/Q near 5 MHz with HackRF.
+
+```
+hackrf_transfer -r output -f 5000000 -s 2600000 -a 1
+```
+
+Then plot the trace.
+
+```
+python3 RF_receive.py output
+python3 RF_receive.py output --save trace.png
+```
+
+The script applies an STFT (8192-sample segments at 2.6 MS/s), takes the magnitude of the zero-frequency bin, drops the first and last 20 frames, and plots `(A_max - A_k) / A_max`. Bits are read from the presence or absence of bursts in each symbol interval.
+
+The script only extracts and plots the trace. It does not synchronize frames, pick a threshold, or output bits.
+
+The figures in the paper were produced by reading the capture as unsigned 8-bit samples, which is the default here. `hackrf_transfer` actually writes signed 8-bit samples. Use `--dtype int8` to read them that way.
+
+5 MHz is where switching-related bursts were easiest to see in our setup. It may differ with other hardware, and RF results were obtained only with the antenna touching the cable.
+
+## License
+
+MIT

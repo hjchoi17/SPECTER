@@ -1,171 +1,143 @@
-import os
+"""SPECTER transmitter.
+
+Encodes a bit string through host-side USB power-management (Linux sysfs)
+or device-state (Windows DevCon) operations. The payload is never placed in
+USB data transfers. These operations do not by themselves guarantee that
+VBUS is physically disconnected; the observable effect depends on the host
+controller, hub, driver, and connected device.
+
+Requires root on Linux and administrator privileges on Windows.
+"""
+
+import argparse
+import platform
+import subprocess
 import sys
 import time
-import getopt
-import subprocess
-import platform
 
-def usage():
-    print("-------------------------------------------------usage-------------------------------------------------------------------------")
-    print("python3 final_send.py [-i inptut_message]")
-    print("python3 final_send.py [--input inptut_message]")
-    print("-------------------------------------------------------------------------------------------------------------------------------")
+SYSFS_DEVICES = "/sys/bus/usb/devices/"
+SYSFS_DRIVER = "/sys/bus/usb/drivers/usb/"
+
+# Values written for the active (bit 1) and inactive (bit 0) control states.
+# Order: level, autosuspend_delay_ms, autosuspend, control
+ACTIVE = [("level", "on"), ("autosuspend_delay_ms", "2000"),
+          ("autosuspend", "2"), ("control", "on")]
+INACTIVE = [("level", "auto"), ("autosuspend_delay_ms", "0"),
+            ("autosuspend", "0"), ("control", "auto")]
+
+
+def sysfs_write(path, value):
+    # Issued through sudo tee, as in the original implementation.
+    # level and autosuspend are legacy attributes and may not exist on newer kernels.
+    subprocess.run(["sudo", "tee", "-a", path], input=(value + "\n").encode(),
+                   stdout=subprocess.DEVNULL, check=False)
+
+
+def linux_apply(port, bases, settings):
+    for base in bases:
+        for attr, value in settings:
+            sysfs_write(base + port + "/power/" + attr, value)
+    with open(SYSFS_DEVICES + port + "/power/runtime_status") as f:
+        print("runtime_status:", f.read().strip())
+
+
+def send_linux(msg, port, interval):
+    try:
+        with open(SYSFS_DEVICES + port + "/manufacturer") as f:
+            manufacturer = f.read().strip()
+    except OSError as e:
+        sys.exit(f"Cannot read manufacturer for port {port!r}: {e}")
+
+    if manufacturer == "SAMSUNG":
+        # Writes through both paths. They may resolve to the same device.
+        bases = [SYSFS_DRIVER, SYSFS_DEVICES]
+    elif manufacturer == "Apple Inc.":
+        bases = [SYSFS_DEVICES]
+    else:
+        sys.exit(f"Unsupported device manufacturer {manufacturer!r}. "
+                 "Only the tested Samsung and Apple branches are implemented.")
+
+    for bit in msg:
+        print("bit", bit)
+        linux_apply(port, bases, ACTIVE if bit == "1" else INACTIVE)
+        time.sleep(interval)
+
+
+def devcon(action, hwid):
+    subprocess.run(["devcon", action, hwid], check=False)
+
+
+def enable(hwid):
+    # A single enable call did not consistently restore the observable
+    # device state in our setup, so it is issued twice.
+    devcon("enable", hwid)
+    devcon("enable", hwid)
+
+
+def send_windows(msg, hwid, interval, rf):
+    # Initialization sequence used in the experiments.
+    enable(hwid)
+    devcon("disable", hwid)
+    enable(hwid)
+
+    if not rf:
+        # State-based encoding: 1 = enabled, 0 = disabled.
+        for bit in msg:
+            print("bit", bit)
+            if bit == "1":
+                enable(hwid)
+            else:
+                devcon("disable", hwid)
+            time.sleep(interval)
+    else:
+        # Event-based encoding: 1 = one state change at the start of the
+        # symbol, 0 = no change.
+        enabled = True
+        for bit in msg:
+            print("bit", bit)
+            if bit == "1":
+                if enabled:
+                    devcon("disable", hwid)
+                else:
+                    enable(hwid)
+                enabled = not enabled
+            time.sleep(interval)
+
 
 def main():
-    try:
-        opts, args = getopt.getopt(sys.argv[1:], "hi:", ["help", "input="])
-    except getopt.GetoptError as err:
-        print(err)
-        usage()
-        sys.exit(2)
+    p = argparse.ArgumentParser(description="SPECTER transmitter")
+    p.add_argument("-i", "--input", required=True,
+                   help="bit string to send, e.g. 101011...")
+    p.add_argument("--port",
+                   help="Linux: USB device path under /sys/bus/usb/devices, e.g. 1-1")
+    p.add_argument("--hwid",
+                   help="Windows: hardware ID (or @instance ID) passed to devcon")
+    p.add_argument("--interval", type=float,
+                   help="waiting period after each symbol in seconds "
+                        "(default 5 on Linux, 1 on Windows)")
+    p.add_argument("--rf", action="store_true",
+                   help="Windows: use event-based encoding for the RF receiver")
+    args = p.parse_args()
 
-    msg = None
-    port = None
-    OS = platform.system()
+    msg = args.input
+    if not msg or set(msg) - {"0", "1"}:
+        p.error("input must consist of 0 and 1 only")
 
-    for o, a in opts:
-        if o in ("-h", "--help"):
-            usage()
-            sys.exit(2)
-        elif o in ("-i", "--input"):
-            msg = a
-        else:
-            usage()
-            sys.exit(2)
-
-    if msg == None:
-        usage()
-        sys.exit(2)
-
-    # ubuntu
-    if OS == "Linux":
-
-        # Input your port
-        port = 'PORT'
-
-        device_query = '/sys/bus/usb/devices/' + port + '/manufacturer'
-        device = subprocess.check_output(["cat", device_query]).decode('utf-8').rstrip()
-
-        for i in msg:
-            if i == "1":
-                query = 'echo "on" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/level'
-                query2 = 'echo "2000" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/autosuspend_delay_ms'
-                query3 = 'echo "2" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/autosuspend'
-                query4 = 'echo "on" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/control'
-                query5 = 'echo "on" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/level'
-                query6 = 'echo "2000" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/autosuspend_delay_ms'
-                query7 = 'echo "2" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/autosuspend'
-                query8 = 'echo "on" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/control'
-
-            elif i == "0":
-                query = 'echo "auto" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/level'
-                query2 = 'echo "0" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/autosuspend_delay_ms'
-                query3 = 'echo "0" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/autosuspend'
-                query4 = 'echo "auto" | sudo tee -a /sys/bus/usb/drivers/usb/' + port + '/power/control'
-                query5 = 'echo "auto" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/level'
-                query6 = 'echo "0" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/autosuspend_delay_ms'
-                query7 = 'echo "0" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/autosuspend'
-                query8 = 'echo "auto" | sudo tee -a /sys/bus/usb/devices/' + port + '/power/control'
-
-            else:
-                print("msg must be 1 or 0!!!")
-                exit(2)
-
-            if device == "SAMSUNG":    
-                os.system(query)
-                os.system(query2)
-                os.system(query3)
-                os.system(query4)
-                os.system(query5)
-                os.system(query6)
-                os.system(query7)
-                os.system(query8)
-                os.system('cat /sys/bus/usb/devices/' + port + '/power/runtime_status')
-
-                time.sleep(5)
-
-            elif device == "Apple Inc.":
-                os.system(query5)
-                os.system(query6)
-                os.system(query7)
-                os.system(query8)
-                os.system('cat /sys/bus/usb/devices/' + port + '/power/runtime_status')
-
-                time.sleep(5)
-
-
-    # Windows
-    elif OS == "Windows":
-        RF = 0
-        state = 1
-
-        # Input your PID
-        parsed_hwid = 'PID'
-
-        subprocess.run(['devcon', 'enable', parsed_hwid])
-        subprocess.run(['devcon', 'enable', parsed_hwid])
-        subprocess.run(['devcon', 'disable', parsed_hwid])
-        subprocess.run(['devcon', 'enable', parsed_hwid])
-        subprocess.run(['devcon', 'enable', parsed_hwid])
-
-        if RF != "1":
-            for i in msg:
-                if i == "0":
-                    subprocess.run(['devcon', 'disable', parsed_hwid])
-
-                    time.sleep(1)
-                
-                elif i == "1":
-                    subprocess.run(['devcon', 'enable', parsed_hwid])
-                    subprocess.run(['devcon', 'enable', parsed_hwid])
-
-                    time.sleep(1)
-
-        elif RF == "1":
-            for i in msg:
-                if i == "0":
-                    print("0")
-
-                    time.sleep(1)
-                
-                elif i == "1":
-                    print("1")
-                    if state == 1:
-                        subprocess.run(['devcon', 'disable', parsed_hwid])
-                        state = 0
-
-                    elif state == 0:
-                        subprocess.run(['devcon', 'enable', parsed_hwid])
-                        subprocess.run(['devcon', 'enable', parsed_hwid])
-                        state = 1
-
-                    time.sleep(1)
-
-
-    # MacOS (Not supported yet)
-    elif OS == "Darwin":
-        for i in msg:
-            if i == "1":
-                try:
-                    os.system('mv /System/Library/Extensions/IOUSBMassStorageClass.kext.bup /System/Library/Extensions/IOUSBMassStorageClass.kext')
-
-                    time.sleep(5)
-
-                except:
-                    time.sleep(5)
-                    pass
-
-            elif i == "0":
-                try:
-                    os.system('mv /System/Library/Extensions/IOUSBMassStorageClass.kext /System/Library/Extensions/IOUSBMassStorageClass.kext.bup')
-                except:
-                    time.sleep(5)
-                    pass
-
+    os_name = platform.system()
+    if os_name == "Linux":
+        if not args.port:
+            p.error("--port is required on Linux")
+        if args.rf:
+            p.error("--rf is implemented for Windows only")
+        send_linux(msg, args.port, args.interval if args.interval is not None else 5.0)
+    elif os_name == "Windows":
+        if not args.hwid:
+            p.error("--hwid is required on Windows")
+        send_windows(msg, args.hwid,
+                     args.interval if args.interval is not None else 1.0, args.rf)
     else:
-        print("Not supported OS")
+        sys.exit(f"Unsupported OS: {os_name}")
 
 
 if __name__ == "__main__":
     main()
-    
